@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eng Lab - 進階英文學習系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Firebase Libraries -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global State & Firebase Config
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'english-learning-v9';
+
+        let currentUser = null;
+        let wordList = [];
+        let activeTab = 'input';
+        let currentQuiz = null;
+        let selectedChoices = [];
+        let quizFeedback = null;
+        let quizMode = 'en-to-zh';
+        let editingId = null;
+
+        // --- DOM Elements ---
+        const tabInput = document.getElementById('tab-input');
+        const tabList = document.getElementById('tab-list');
+        const tabQuiz = document.getElementById('tab-quiz');
+        
+        const navBtns = document.querySelectorAll('.nav-btn');
+        const sections = document.querySelectorAll('.section');
+
+        // --- Auth Initialization ---
+        const initAuth = async () => {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user) {
+                startListeningToWords();
+            }
+        });
+
+        // --- Firestore Listeners ---
+        const startListeningToWords = () => {
+            const wordCol = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'words');
+            onSnapshot(wordCol, (snapshot) => {
+                wordList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderWordList();
+                updateStats();
+            });
+        };
+
+        // --- Core Functions ---
+        window.switchTab = (tabName) => {
+            activeTab = tabName;
+            sections.forEach(s => s.classList.add('hidden'));
+            document.getElementById(`section-${tabName}`).classList.remove('hidden');
+            
+            navBtns.forEach(btn => {
+                btn.classList.remove('bg-indigo-600', 'text-white');
+                btn.classList.add('text-slate-400');
+                if(btn.dataset.tab === tabName) {
+                    btn.classList.add('bg-indigo-600', 'text-white');
+                    btn.classList.remove('text-slate-400');
+                }
+            });
+
+            if(tabName === 'quiz') startChoiceQuiz();
+        };
+
+        window.playAudio = (text) => {
+            if (!text) return;
+            const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text)}&tl=en&total=1&idx=0&textlen=${text.length}&client=tw-ob&prev=input`;
+            new Audio(url).play();
+        };
+
+        // --- Word Management ---
+        const meaningsContainer = document.getElementById('meanings-container');
+        window.addMeaningField = (value = '') => {
+            const div = document.createElement('div');
+            div.className = "flex gap-2 meaning-field animate-in fade-in zoom-in-95";
+            div.innerHTML = `
+                <input type="text" value="${value}" class="meaning-input flex-1 bg-slate-50 rounded-xl px-4 py-2.5 outline-none" placeholder="輸入中文含義...">
+                <button onclick="this.parentElement.remove()" class="text-slate-300 hover:text-rose-500"><i data-lucide="x" class="w-4 h-4"></i></button>
+            `;
+            meaningsContainer.appendChild(div);
+            lucide.createIcons();
+        };
+
+        window.saveWord = async () => {
+            const word = document.getElementById('input-word').value.trim().toLowerCase();
+            const pos = document.getElementById('input-pos').value;
+            const mInputs = document.querySelectorAll('.meaning-input');
+            const meanings = Array.from(mInputs).map(i => i.value.trim()).filter(v => v !== '');
+
+            if (!word || meanings.length === 0 || !currentUser) return;
+
+            const wordCol = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'words');
+            await addDoc(wordCol, {
+                word, meanings, pos,
+                wrongCount: 0, quizCount: 0, createdAt: Date.now()
+            });
+
+            document.getElementById('input-word').value = '';
+            meaningsContainer.innerHTML = '';
+            addMeaningField();
+            switchTab('list');
+        };
+
+        window.handleAutoTranslate = async () => {
+            const word = document.getElementById('input-word').value;
+            if (!word) return;
+            try {
+                const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q=${encodeURIComponent(word)}`);
+                const data = await res.json();
+                meaningsContainer.innerHTML = '';
+                addMeaningField(data[0][0][0]);
+            } catch(e) { console.error(e); }
+        };
+
+        const renderWordList = () => {
+            const container = document.getElementById('word-list-container');
+            const search = document.getElementById('search-box').value.toLowerCase();
+            container.innerHTML = '';
+
+            wordList.filter(w => w.word.includes(search) || w.meanings.some(m => m.includes(search)))
+            .forEach(item => {
+                const div = document.createElement('div');
+                div.className = "bg-white p-3 rounded-xl border border-slate-100 shadow-sm flex justify-between items-center";
+                div.innerHTML = `
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span class="font-black text-sm">${item.word}</span>
+                            <span class="text-[9px] font-bold bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded uppercase">${item.pos}</span>
+                            <button onclick="playAudio('${item.word}')" class="text-slate-300 hover:text-indigo-500"><i data-lucide="volume-2" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                        <div class="text-[11px] text-slate-500 truncate mt-0.5">${item.meanings.join(', ')}</div>
+                    </div>
+                    <div class="flex gap-1">
+                        <button onclick="deleteWord('${item.id}')" class="p-2 text-slate-300 hover:text-rose-500"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+            lucide.createIcons();
+        };
+
+        window.deleteWord = async (id) => {
+            if(confirm("確定刪除？")) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'words', id));
+            }
+        };
+
+        // --- Quiz Engine ---
+        window.startChoiceQuiz = async () => {
+            if (wordList.length < 4) {
+                alert("請先加入至少 4 個單字");
+                switchTab('input');
+                return;
+            }
+
+            const minCount = Math.min(...wordList.map(w => w.quizCount || 0));
+            const pool = wordList.filter(w => (w.quizCount || 0) <= minCount);
+            const weighted = [];
+            pool.forEach(w => {
+                for(let i=0; i < (w.wrongCount || 0) + 1; i++) weighted.push(w);
+            });
+            const selected = weighted[Math.floor(Math.random() * weighted.length)];
+            
+            quizMode = Math.random() > 0.5 ? 'en-to-zh' : 'zh-to-en';
+            currentQuiz = selected;
+            selectedChoices = [];
+            quizFeedback = null;
+
+            let options = [];
+            if (quizMode === 'en-to-zh') {
+                const correct = selected.meanings.map(m => ({ text: m, isCorrect: true }));
+                const wrong = wordList
+                    .filter(w => w.word !== selected.word)
+                    .flatMap(w => w.meanings)
+                    .sort(() => Math.random() - 0.5)
+                    .slice(0, 5)
+                    .map(m => ({ text: m, isCorrect: false }));
+                options = [...correct, ...wrong].sort(() => Math.random() - 0.5);
+            } else {
+                options = [{ text: selected.word, isCorrect: true }];
+                const used = new Set([selected.word]);
+                const candidates = [...wordList].sort(() => Math.random() - 0.5);
+                for(let w of candidates) {
+                    if(!used.has(w.word)) {
+                        options.push({ text: w.word, isCorrect: false });
+                        used.add(w.word);
+                    }
+                    if(options.length >= 4) break;
+                }
+                options.sort(() => Math.random() - 0.5);
+            }
+            currentQuiz.options = options;
+            renderQuiz();
+
+            if (currentUser) {
+                await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'words', selected.id), {
+                    quizCount: (selected.quizCount || 0) + 1
+                });
+            }
+        };
+
+        const renderQuiz = () => {
+            const container = document.getEle
